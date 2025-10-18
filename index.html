@@ -2,109 +2,121 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Stone Ripples — Calm Water</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>Stone Ripples — Mobile Friendly</title>
 <style>
-  html,body{height:100%;margin:0;background:#000}
-  canvas{display:block;width:100%;height:100%}
-  /* tiny, unobtrusive hint */
+  /* Make the canvas truly fill on mobile (account for dynamic toolbars) */
+  html, body { margin:0; padding:0; height:100%; background:#000; }
+  body { min-height:100svh; }
+  canvas { display:block; width:100%; height:100%; touch-action:manipulation; }
   .hint{
     position:fixed; left:12px; bottom:12px; z-index:2;
-    color:#dfe7f1; font:500 12px/1.4 system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+    color:#dfe7f1; font:600 12px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
     background:rgba(255,255,255,.06);
     border:1px solid rgba(255,255,255,.18);
     border-radius:10px; padding:8px 10px;
-    backdrop-filter:blur(8px) saturate(120%);
-    -webkit-backdrop-filter:blur(8px) saturate(120%);
-    opacity:.85;
+    backdrop-filter:blur(8px) saturate(120%); -webkit-backdrop-filter:blur(8px) saturate(120%);
+    opacity:.9;
+    user-select:none; -webkit-user-select:none;
   }
 </style>
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div class="hint">Tap/click to drop a stone (max 3). Double-click to clear.</div>
+<div class="hint">Tap to drop a stone (max 3). Double-tap or long-press to clear.</div>
 
 <script>
 (() => {
   const canvas = document.getElementById('gl');
-  const gl = canvas.getContext('webgl', {antialias:false, alpha:false, depth:false, stencil:false});
-  if(!gl){ alert('WebGL not supported'); return; }
+  // Ask nicely for a WebGL1 context; avoid extensions for max compatibility
+  const gl = canvas.getContext('webgl', {
+    alpha:false, antialias:true, depth:false, stencil:false, preserveDrawingBuffer:false,
+    powerPreference:'low-power'
+  }) || canvas.getContext('experimental-webgl');
+  if (!gl) { alert('WebGL not supported on this device/browser.'); return; }
 
-  // --- Shaders ---
   const vert = `
     attribute vec2 a_pos;
     void main(){ gl_Position = vec4(a_pos,0.0,1.0); }
   `;
-  // Multiple slow, damped ripple sources.
+
+  /* Mobile-safe fragment shader:
+     - No dynamic loops; 3 ripple sources are unrolled
+     - No int uniforms; all floats
+     - Gentle speed/damping for a calm vibe
+  */
   const frag = `
-    precision highp float;
+    precision mediump float;
     uniform vec2  u_res;
     uniform float u_time;
-    uniform int   u_count;       // number of active sources (<=3)
-    uniform vec2  u_pos[3];      // positions in 0..1 (x,y)
-    uniform float u_t0[3];       // start times (seconds)
-    uniform vec3  u_color;       // base color 0..1
-    // aesthetic helpers
-    float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }
+
+    uniform vec2  u_pos0; uniform float u_t00; uniform float u_w0;
+    uniform vec2  u_pos1; uniform float u_t01; uniform float u_w1;
+    uniform vec2  u_pos2; uniform float u_t02; uniform float u_w2;
+
+    uniform vec3  u_color;
+
+    // lite noise for water shimmer
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
     float noise(vec2 p){
       vec2 i=floor(p), f=fract(p);
       float a=hash(i), b=hash(i+vec2(1.,0.)), c=hash(i+vec2(0.,1.)), d=hash(i+vec2(1.,1.));
-      vec2 u=f*f*(3.-2.*f);
+      vec2 u=f*f*(3.0-2.0*f);
       return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
     }
+
+    float ripple(vec2 uv, vec2 pos, float t0, float weight, float aspect){
+      // If weight=0, contribute nothing (avoids dynamic branching)
+      if (weight < 0.001) return 0.0;
+
+      float age = max(0.0, u_time - t0);
+      vec2 p = uv - pos;
+      p.x *= aspect;
+      float r = length(p) + 1e-5;
+
+      // Peaceful parameters (slow, wide rings, gentle fade)
+      float kBase = 14.0;   // spatial frequency (ring density)
+      float omega = 0.65;   // temporal speed (slower = calmer)
+      float dampR = 0.9;    // spatial damping
+      float dampT = 0.35;   // time damping
+
+      float phase = kBase * r - omega * age;
+
+      // emphasize the expanding front softly
+      float front = abs(r - (omega/kBase) * age);
+      float frontEnv = exp(-front * 6.0);
+      float ring = sin(phase) * exp(-dampR * r) * exp(-dampT * age);
+
+      return weight * ring * (0.65 + 0.35 * frontEnv);
+    }
+
     void main(){
-      vec2 uv = gl_FragCoord.xy / u_res;
-      vec2 uvA = uv; // for shimmer
-      // aspect-corrected coords for circular ripples
-      vec2 toCenter = vec2(uv.x, uv.y);
-      float aspect = u_res.x / u_res.y;
+      vec2 res = u_res;
+      vec2 uv = gl_FragCoord.xy / res;
+      float aspect = res.x / res.y;
 
-      // Accumulate ripple field
+      // Base ambient so the screen is never fully black
+      float amb = 0.52;
+
+      // Ripple field from up to 3 sources (unrolled)
       float field = 0.0;
+      field += ripple(uv, u_pos0, u_t00, u_w0, aspect);
+      field += ripple(uv, u_pos1, u_t01, u_w1, aspect);
+      field += ripple(uv, u_pos2, u_t02, u_w2, aspect);
 
-      // Global ripple aesthetics (kept low/slow for peaceful look)
-      float kBase   = 14.0;   // spatial frequency (rings density) — lower = wider rings
-      float omega   = 0.65;   // temporal speed — lower = slower travel
-      float dampR   = 0.9;    // radial damping factor
-      float dampT   = 0.35;   // time damping (fades older ripples)
+      // Subtle water shimmer
+      float sh = noise(uv * vec2(3.0,4.2) + u_time * 0.06) * 0.05;
 
-      for(int i=0;i<3;i++){
-        if(i >= u_count) break;
-        float age = max(0.0, u_time - u_t0[i]);  // seconds since drop
-        // position with aspect correction
-        vec2 p = uv - u_pos[i];
-        p.x *= aspect;
-        float r = length(p) + 1e-5;
+      // Map to brightness
+      float amp = amb + 0.5 * tanh(field * 1.2);
 
-        // classic water: sin(k*r - omega*t), with gentle damping in space and time
-        float k = kBase;
-        float phase = k * r - omega * age;
+      // Vignette towards black at edges
+      vec2 c = uv - vec2(0.5);
+      c.x *= aspect;
+      float rad = length(c);
+      float vignette = smoothstep(1.0, 0.35, rad);
 
-        // envelope: more visible near the expanding front, but still concentric rings
-        // slow traveling emphasis by softly boosting the ring near r ≈ omega/k * age
-        float front = abs(r - (omega/k) * age);
-        float frontEnv = exp(-front * 6.0);       // narrow-ish emphasis band
-        float ring = sin(phase) * exp(-dampR * r) * exp(-dampT * age);
-        field += ring * (0.65 + 0.35 * frontEnv);
-      }
-
-      // Gentle shimmer so the water feels alive
-      float sh = noise(uvA * vec2(3.0,4.2) + u_time * 0.06) * 0.05;
-
-      // Map field to brightness; keep it subtle and calm
-      float amp = 0.5 + 0.5 * tanh(field * 1.2);
-      amp = mix(0.48, 1.0, amp); // lift the darks a bit
-
-      // Vignette to fade color to black toward edges
-      vec2 cPos = uv - vec2(0.5);
-      cPos.x *= aspect;
-      float rad = length(cPos);
-      float vignette = smoothstep(1.0, 0.35, rad); // center bright, edges black
-
-      // Compose color
       vec3 col = (u_color + vec3(sh)) * amp * vignette;
-
-      // Slight center depth
       col *= 1.05 - rad * 0.12;
 
       gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
@@ -114,8 +126,9 @@
   function compile(type, src){
     const s = gl.createShader(type);
     gl.shaderSource(s, src); gl.compileShader(s);
-    if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)){
-      console.error(gl.getShaderInfoLog(s)); throw new Error('Shader compile error');
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      console.error(gl.getShaderInfoLog(s));
+      throw new Error('Shader compile error');
     }
     return s;
   }
@@ -123,7 +136,10 @@
   const fs = compile(gl.FRAGMENT_SHADER, frag);
   const prog = gl.createProgram();
   gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
-  if(!gl.getProgramParameter(prog, gl.LINK_STATUS)){ throw new Error('Link error'); }
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.error(gl.getProgramInfoLog(prog));
+    throw new Error('Program link error');
+  }
   gl.useProgram(prog);
 
   // Fullscreen quad
@@ -140,93 +156,104 @@
   // Uniforms
   const u_res   = gl.getUniformLocation(prog, 'u_res');
   const u_time  = gl.getUniformLocation(prog, 'u_time');
-  const u_count = gl.getUniformLocation(prog, 'u_count');
-  const u_pos   = gl.getUniformLocation(prog, 'u_pos[0]');
-  const u_t0    = gl.getUniformLocation(prog, 'u_t0[0]');
+
+  const u_pos0  = gl.getUniformLocation(prog, 'u_pos0');
+  const u_t00   = gl.getUniformLocation(prog, 'u_t00');
+  const u_w0    = gl.getUniformLocation(prog, 'u_w0');
+
+  const u_pos1  = gl.getUniformLocation(prog, 'u_pos1');
+  const u_t01   = gl.getUniformLocation(prog, 'u_t01');
+  const u_w1    = gl.getUniformLocation(prog, 'u_w1');
+
+  const u_pos2  = gl.getUniformLocation(prog, 'u_pos2');
+  const u_t02   = gl.getUniformLocation(prog, 'u_t02');
+  const u_w2    = gl.getUniformLocation(prog, 'u_w2');
+
   const u_color = gl.getUniformLocation(prog, 'u_color');
 
   // State
-  const MAX = 3;
   const drops = []; // {x,y,t}
+  const MAX = 3;
   let start = performance.now();
 
-  // Soft, soothing palette; pick one at load
   const COLORS = ['#6be5d5','#63a8ff','#9fe870','#ffd166','#ff8fab','#9a8cff','#55efc4','#00d1ff'];
   function hexToRgb(hex){
     hex = hex.replace('#','');
-    if(hex.length===3) hex = hex.split('').map(x=>x+x).join('');
+    if (hex.length===3) hex = hex.split('').map(x=>x+x).join('');
     const n = parseInt(hex,16);
     return [((n>>16)&255)/255, ((n>>8)&255)/255, (n&255)/255];
   }
   const baseColor = hexToRgb(COLORS[Math.floor(Math.random()*COLORS.length)]);
 
-  // Size/viewport
+  // Size/viewport (svh-safe)
   function resize(){
-    const dpr = Math.max(1, window.devicePixelRatio||1);
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
     const w = Math.floor(canvas.clientWidth * dpr);
     const h = Math.floor(canvas.clientHeight * dpr);
-    if(canvas.width!==w || canvas.height!==h){ canvas.width=w; canvas.height=h; }
+    if (canvas.width !== w || canvas.height !== h){
+      canvas.width = w; canvas.height = h;
+    }
     gl.viewport(0,0,canvas.width,canvas.height);
     gl.uniform2f(u_res, canvas.width, canvas.height);
   }
-  new ResizeObserver(resize).observe(canvas);
+  const ro = new ResizeObserver(resize);
+  ro.observe(canvas);
+  addEventListener('orientationchange', ()=> setTimeout(resize, 200), {passive:true});
 
   // Render loop
   function render(){
     const t = (performance.now() - start)/1000;
     gl.uniform1f(u_time, t);
 
-    const count = Math.min(MAX, drops.length);
-    gl.uniform1i(u_count, count);
+    // Pack up to 3 drops, rest become weight=0
+    const d0 = drops[0] || {x:0.5,y:0.5,t:0};
+    const d1 = drops[1] || {x:0.5,y:0.5,t:0};
+    const d2 = drops[2] || {x:0.5,y:0.5,t:0};
+    gl.uniform2f(u_pos0, d0.x, d0.y); gl.uniform1f(u_t00, d0.t); gl.uniform1f(u_w0, drops[0]?1.0:0.0);
+    gl.uniform2f(u_pos1, d1.x, d1.y); gl.uniform1f(u_t01, d1.t); gl.uniform1f(u_w1, drops[1]?1.0:0.0);
+    gl.uniform2f(u_pos2, d2.x, d2.y); gl.uniform1f(u_t02, d2.t); gl.uniform1f(u_w2, drops[2]?1.0:0.0);
 
-    // Pack arrays
-    const pos = new Float32Array([0,0, 0,0, 0,0]);
-    const t0  = new Float32Array([0,0,0]);
-    for(let i=0;i<count;i++){
-      pos[i*2+0] = drops[i].x;
-      pos[i*2+1] = drops[i].y;
-      t0[i] = drops[i].t;
-    }
-    gl.uniform2fv(u_pos, pos);
-    gl.uniform1fv(u_t0, t0);
     gl.uniform3f(u_color, baseColor[0], baseColor[1], baseColor[2]);
 
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     requestAnimationFrame(render);
   }
 
-  // Pointer -> add drop
+  // Pointer handling (tap, double-tap, long-press)
   function addDrop(clientX, clientY){
     const rect = canvas.getBoundingClientRect();
     const x = (clientX - rect.left) / rect.width;
     const y = (clientY - rect.top) / rect.height;
     const t = (performance.now() - start)/1000;
-    if(drops.length >= MAX) drops.shift(); // remove oldest
+    if (drops.length >= MAX) drops.shift();
     drops.push({x,y,t});
   }
 
-  // Interactions
-  let clickTimer=null; let pressTimer=null;
+  let lastTap = 0; let pressTimer = null;
 
   canvas.addEventListener('pointerdown', (e)=>{
-    // long-press clears
+    // long-press to clear
     clearTimeout(pressTimer);
     pressTimer = setTimeout(()=>{ drops.length = 0; }, 600);
-  });
+  }, {passive:true});
+
   canvas.addEventListener('pointerup', (e)=>{
     clearTimeout(pressTimer);
-  });
+  }, {passive:true});
+
   canvas.addEventListener('click', (e)=>{
-    // simple click adds a drop
-    addDrop(e.clientX, e.clientY);
-  });
-  canvas.addEventListener('dblclick', ()=>{
-    drops.length = 0;
-  });
+    const now = performance.now();
+    if (now - lastTap < 300) { // double-tap
+      drops.length = 0;
+    } else {
+      addDrop(e.clientX, e.clientY);
+    }
+    lastTap = now;
+  }, {passive:true});
 
-  // Kickoff
-  resize(); render();
-
+  // Start
+  resize();
+  render();
 })();
 </script>
 </body>
