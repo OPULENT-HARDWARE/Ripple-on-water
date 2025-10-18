@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Soothing Ripples — Frequency Visualizer</title>
+<style>
+  :root{
+    --ui-bg: rgba(255,255,255,.08);
+    --ui-stroke: rgba(255,255,255,.25);
+    --ui-text: #eaf1f8;
+  }
+  html,body{height:100%;margin:0;background:#000;color:var(--ui-text);font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  canvas{display:block;width:100%;height:100%}
+
+  /* Frosted menu */
+  .menu{
+    position:fixed; top:12px; right:12px; z-index:2;
+    backdrop-filter: blur(10px) saturate(120%);
+    -webkit-backdrop-filter: blur(10px) saturate(120%);
+    background: var(--ui-bg);
+    border:1px solid var(--ui-stroke);
+    border-radius:16px;
+    box-shadow: 0 8px 30px rgba(0,0,0,.35);
+    overflow:hidden;
+  }
+  .menu.collapsed .panel{display:none}
+  .menu .bar{
+    display:flex; align-items:center; gap:10px;
+    padding:10px 12px; cursor:pointer; user-select:none;
+  }
+  .menu .dot{width:8px;height:8px;border-radius:50%;background:#8ad3ff; box-shadow:0 0 0 1px rgba(255,255,255,.3) inset}
+  .menu .title{font-weight:700; letter-spacing:.3px}
+  .menu .panel{
+    padding:10px 12px; display:grid; gap:10px; min-width:min(78vw, 360px);
+    grid-template-columns: 1fr;
+  }
+  .row{display:grid; gap:8px}
+  .row.inline{grid-template-columns: 1fr auto; align-items:end}
+  label{font-size:12px; opacity:.9}
+  input[type="number"], select, input[type="range"]{
+    width:100%; background:rgba(255,255,255,.06); color:var(--ui-text);
+    border:1px solid var(--ui-stroke); border-radius:10px; padding:8px 10px;
+    outline:none;
+  }
+  input[type="range"]{padding:0; height:28px; accent-color:#9fe870}
+  .chips{display:flex;flex-wrap:wrap;gap:8px}
+  .chip{
+    border:1px solid var(--ui-stroke); border-radius:999px; padding:6px 10px; font-size:12px; cursor:pointer;
+    background:rgba(255,255,255,.04); user-select:none;
+  }
+  .chip.active{outline:2px solid rgba(255,255,255,.5)}
+  .swatches{display:flex;flex-wrap:wrap;gap:8px}
+  .sw{width:28px;height:28px;border-radius:50%;border:1px solid var(--ui-stroke);cursor:pointer}
+  .sw.active{outline:2px solid rgba(255,255,255,.65)}
+  .note{font-size:11px; opacity:.75; line-height:1.35}
+  .footer{display:flex; gap:8px; justify-content:space-between; align-items:center; font-size:12px; opacity:.9}
+
+  .btn{
+    appearance:none;border:1px solid var(--ui-stroke);
+    background:linear-gradient(180deg, rgba(255,255,255,.07), rgba(255,255,255,.03));
+    color:var(--ui-text); padding:8px 10px; border-radius:10px; cursor:pointer; font-weight:600;
+  }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+
+<!-- Frosted Menu -->
+<div class="menu collapsed" id="menu">
+  <div class="bar" id="toggle">
+    <div class="dot" id="dot"></div>
+    <div class="title">Ripple Settings</div>
+    <div style="margin-left:auto;font-weight:700">⋯</div>
+  </div>
+  <div class="panel">
+    <div class="row">
+      <label for="preset">Preset frequency (popular associations)</label>
+      <select id="preset">
+        <option value="">— Choose a preset —</option>
+        <option value="174">174 Hz — grounding (calming)</option>
+        <option value="285">285 Hz — body awareness</option>
+        <option value="396">396 Hz — release fear</option>
+        <option value="432">432 Hz — “calming” tuning</option>
+        <option value="528">528 Hz — “healing / love”</option>
+        <option value="639">639 Hz — connection</option>
+        <option value="741">741 Hz — clarity</option>
+        <option value="852">852 Hz — intuition</option>
+        <option value="40">40 Hz — focus (gamma)</option>
+      </select>
+      <div class="note">Associations are popular/subjective, not scientifically validated. Use whatever feels good.</div>
+    </div>
+
+    <div class="row">
+      <label for="freq">Custom frequency (Hz)</label>
+      <div class="row inline">
+        <input id="freq" type="number" min="1" max="2000" step="1" value="432" />
+        <button class="btn" id="randomFreq">Random</button>
+      </div>
+      <input id="freqRange" type="range" min="1" max="2000" step="1" value="432" />
+    </div>
+
+    <div class="row">
+      <label>Color theme</label>
+      <div class="chips" id="themeChips"></div>
+      <div class="swatches" id="swatches"></div>
+      <div class="row inline">
+        <button class="btn" id="randomColor">Random color</button>
+        <button class="btn" id="invert">Invert</button>
+      </div>
+    </div>
+
+    <div class="footer">
+      <span class="note">Click the title bar to hide/show. Changes apply live.</span>
+      <button class="btn" id="centerBtn">Center ripple</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  // ====== WebGL Setup ======
+  const canvas = document.getElementById('gl');
+  const gl = canvas.getContext('webgl', { antialias:false, alpha:false, depth:false, stencil:false, preserveDrawingBuffer:false });
+  if (!gl) { alert('WebGL not supported'); return; }
+
+  const vert = `
+  attribute vec2 a_pos;
+  void main(){ gl_Position = vec4(a_pos, 0.0, 1.0); }
+  `;
+
+  const frag = `
+  precision highp float;
+  uniform vec2 u_res;
+  uniform float u_time;
+  uniform float u_freq;
+  uniform vec2 u_center;
+  uniform vec3 u_color;
+  uniform float u_invert;
+
+  // tiny hash noise for watery shimmer
+  float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453123); }
+  float noise(vec2 p){
+    vec2 i = floor(p), f = fract(p);
+    float a = hash(i), b = hash(i+vec2(1.,0.)), c = hash(i+vec2(0.,1.)), d = hash(i+vec2(1.,1.));
+    vec2 u = f*f*(3.0-2.0*f);
+    return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
+  }
+
+  void main(){
+    // Normalized coords: center at u_center, correct aspect
+    vec2 uv = (gl_FragCoord.xy / u_res);
+    vec2 c = u_center;
+    vec2 p = uv - c;
+    p.x *= u_res.x / u_res.y; // aspect
+
+    float r = length(p);
+
+    // Map frequency to ring spacing & speed
+    float f = clamp(u_freq, 1.0, 2000.0);
+    // wave number scales with sqrt(f) so higher freq -> tighter rings
+    float k = mix(8.0, 42.0, sqrt(f/2000.0));
+    // phase speed: higher freq, slightly faster outward phase
+    float speed = mix(0.5, 1.4, f/2000.0);
+
+    // Ripple field
+    float phase = 6.2831853*(f * u_time*0.1*speed) - k*r;
+    float w = 0.5 + 0.5*sin(phase);
+
+    // Gentle shimmer
+    float shimmer = noise(uv*vec2(3.0,4.0) + u_time*0.08)*0.08;
+
+    // Soft vignette to black at edges
+    float vignette = smoothstep(0.98, 0.35, r); // center bright, edges dark
+
+    // Combine
+    float amp = pow(w, 1.2) + shimmer;
+    vec3 base = u_color;
+    vec3 col = base * amp * vignette;
+
+    // Subtle deeper dark
+    col *= 1.08 - r*0.25;
+
+    // Invert (for fun alt moods)
+    col = mix(col, 1.0 - col, u_invert);
+
+    // Clamp + gamma-ish
+    col = pow(clamp(col, 0.0, 1.0), vec3(0.95));
+    gl_FragColor = vec4(col, 1.0);
+  }`;
+
+  function compile(type, src){
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      console.error(gl.getShaderInfoLog(s)); throw new Error('Shader compile error');
+    }
+    return s;
+  }
+  const vs = compile(gl.VERTEX_SHADER, vert);
+  const fs = compile(gl.FRAGMENT_SHADER, frag);
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { throw new Error('Link error'); }
+  gl.useProgram(prog);
+
+  const a_pos = gl.getAttribLocation(prog, 'a_pos');
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+    -1,-1,  1,-1, -1, 1,
+     1,-1,  1, 1, -1, 1
+  ]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(a_pos);
+  gl.vertexAttribPointer(a_pos, 2, gl.FLOAT, false, 0, 0);
+
+  const u_res = gl.getUniformLocation(prog, 'u_res');
+  const u_time = gl.getUniformLocation(prog, 'u_time');
+  const u_freq = gl.getUniformLocation(prog, 'u_freq');
+  const u_center = gl.getUniformLocation(prog, 'u_center');
+  const u_color = gl.getUniformLocation(prog, 'u_color');
+  const u_invert = gl.getUniformLocation(prog, 'u_invert');
+
+  let start = performance.now();
+  let freq = 432;
+  let center = [0.5, 0.5];
+  let invert = 0.0;
+
+  function hexToRgb(hex){
+    hex = hex.replace('#','');
+    if (hex.length===3) hex = hex.split('').map(x=>x+x).join('');
+    const n = parseInt(hex,16); 
+    return [((n>>16)&255)/255, ((n>>8)&255)/255, (n&255)/255];
+  }
+
+  // Themes and colors
+  const THEMES = [
+    { name:'Calm', freq:432 },
+    { name:'Energy', freq:741 },
+    { name:'Healing', freq:528 },
+    { name:'Grounding', freq:174 },
+    { name:'Focus', freq:40 },
+  ];
+  const COLORS = [
+    '#6be5d5','#63a8ff','#9fe870','#ffd166','#ff8fab',
+    '#9a8cff','#f7a072','#55efc4','#f1c40f','#00d1ff'
+  ];
+  let baseColor = hexToRgb(COLORS[Math.floor(Math.random()*COLORS.length)]);
+
+  function resize(){
+    const dpr = Math.max(1, window.devicePixelRatio||1);
+    const w = Math.floor(canvas.clientWidth * dpr);
+    const h = Math.floor(canvas.clientHeight * dpr);
+    if (canvas.width !== w || canvas.height !== h){
+      canvas.width = w; canvas.height = h;
+    }
+    gl.viewport(0,0,canvas.width,canvas.height);
+    gl.uniform2f(u_res, canvas.width, canvas.height);
+  }
+  const ro = new ResizeObserver(resize);
+  ro.observe(canvas);
+
+  function render(){
+    const t = (performance.now() - start) / 1000;
+    gl.uniform1f(u_time, t);
+    gl.uniform1f(u_freq, freq);
+    gl.uniform2f(u_center, center[0], center[1]);
+    gl.uniform3f(u_color, baseColor[0], baseColor[1], baseColor[2]);
+    gl.uniform1f(u_invert, invert);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    requestAnimationFrame(render);
+  }
+  resize(); render();
+
+  // ====== UI Hookup ======
+  const menu = document.getElementById('menu');
+  const toggle = document.getElementById('toggle');
+  const dot = document.getElementById('dot');
+  const preset = document.getElementById('preset');
+  const freqNum = document.getElementById('freq');
+  const freqRange = document.getElementById('freqRange');
+  const randomFreq = document.getElementById('randomFreq');
+  const themeChips = document.getElementById('themeChips');
+  const swatches = document.getElementById('swatches');
+  const randomColor = document.getElementById('randomColor');
+  const invertBtn = document.getElementById('invert');
+  const centerBtn = document.getElementById('centerBtn');
+
+  toggle.addEventListener('click', ()=> menu.classList.toggle('collapsed'));
+
+  // Build theme chips
+  THEMES.forEach(t=>{
+    const el = document.createElement('button');
+    el.className = 'chip';
+    el.textContent = t.name;
+    el.addEventListener('click', ()=>{
+      setFrequency(t.freq);
+      highlightChips(el);
+    });
+    themeChips.appendChild(el);
+  });
+  function highlightChips(active){
+    [...themeChips.children].forEach(ch => ch.classList.toggle('active', ch===active));
+  }
+
+  // Build color swatches
+  COLORS.forEach(c=>{
+    const el = document.createElement('button');
+    el.className = 'sw';
+    el.style.background = c;
+    el.title = c;
+    el.addEventListener('click', ()=>{
+      baseColor = hexToRgb(c);
+      highlightSwatch(el);
+      dot.style.background = c;
+    });
+    swatches.appendChild(el);
+  });
+  function highlightSwatch(active){
+    [...swatches.children].forEach(sw => sw.classList.toggle('active', sw===active));
+  }
+  // Initialize a random active swatch
+  const initialSw = swatches.children[Math.floor(Math.random()*swatches.children.length)];
+  if (initialSw){ initialSw.click(); }
+
+  function setFrequency(v){
+    v = Math.max(1, Math.min(2000, Math.round(Number(v)||432)));
+    freq = v;
+    freqNum.value = v;
+    freqRange.value = v;
+    preset.value = '';
+  }
+  preset.addEventListener('change', e=>{
+    const v = Number(e.target.value);
+    if (v) setFrequency(v);
+  });
+  freqNum.addEventListener('input', e=> setFrequency(e.target.value));
+  freqRange.addEventListener('input', e=> setFrequency(e.target.value));
+  randomFreq.addEventListener('click', ()=>{
+    const rnd = 10 + Math.floor(Math.pow(Math.random(), 1.5) * 1990); // bias lower
+    setFrequency(rnd);
+  });
+  randomColor.addEventListener('click', ()=>{
+    (swatches.children[Math.floor(Math.random()*swatches.children.length)]||initialSw).click();
+  });
+  invertBtn.addEventListener('click', ()=> invert = invert>0.5 ? 0.0 : 1.0 );
+
+  // Center control: click canvas to move ripple origin
+  canvas.addEventListener('pointerdown', (e)=>{
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+    center = [x, y];
+  }, {passive:true});
+  centerBtn.addEventListener('click', ()=> center = [0.5, 0.5]);
+
+  // Hide menu after 4s inactivity (unobtrusive)
+  let hideTimer;
+  const autoHide = ()=>{
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(()=> menu.classList.add('collapsed'), 4000);
+  };
+  ['pointermove','pointerdown','keydown'].forEach(evt => addEventListener(evt, autoHide, {passive:true}));
+  autoHide();
+})();
+</script>
+</body>
+</html>
